@@ -23,6 +23,7 @@ const settingsForm  = document.getElementById('settingsForm');
 async function init() {
   await loadRadios();
   await loadConfig();
+  await loadAppVersion();
   setupEventListeners();
   setupBroadcastListener();
   setupDiscoveryListener();
@@ -30,6 +31,14 @@ async function init() {
   try {
     const existing = await window.smartunlink.getDiscovered();
     existing.forEach(f => handleDiscovered(f));
+  } catch (_) {}
+}
+
+async function loadAppVersion() {
+  try {
+    const version = await window.smartunlink.getAppVersion();
+    const el = document.getElementById('appVersion');
+    if (el) el.textContent = `v${version}`;
   } catch (_) {}
 }
 

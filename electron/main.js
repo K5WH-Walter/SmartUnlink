@@ -289,8 +289,9 @@ function createWindow() {
 
 // ─── IPC handlers ─────────────────────────────────────────────────────────────
 
-ipcMain.handle('get-radios',  () => config.radios);
-ipcMain.handle('get-config',  () => config);
+ipcMain.handle('get-radios',      () => config.radios);
+ipcMain.handle('get-config',      () => config);
+ipcMain.handle('get-app-version', () => app.getVersion());
 
 ipcMain.handle('add-radio', (event, radio) => {
   radio.id      = uuidv4();

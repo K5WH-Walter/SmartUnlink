@@ -39,15 +39,16 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: List dist folder
-        run: dir dist
+        run: dir dist /s /b
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4.6.2
         with:
           name: SmartUnlink-Windows
           path: |
-            dist/*.exe
-            dist/*.msi
+            dist/**/*.exe
+            dist/**/*.msi
+            !dist/win-unpacked/**
           if-no-files-found: warn
 
   build-macos:
