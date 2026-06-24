@@ -1,6 +1,6 @@
 {
   "name": "smartunlink",
-  "version": "1.0.5",
+  "version": "1.0.7",
   "description": "Standalone FlexRadio Discovery Proxy - Broadcasts VITA-49 discovery packets for VPN/remote connections",
   "main": "electron/main.js",
   "scripts": {
