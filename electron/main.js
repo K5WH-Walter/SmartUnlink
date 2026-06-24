@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const dgram = require('dgram');
@@ -13,208 +13,248 @@ let config = {
 };
 
 let mainWindow = null;
-let udpClient = null;
+let udpSender = null;       // socket used to broadcast outgoing discovery packets
+let udpListener = null;     // socket used to listen for radios announcing themselves
 let broadcastInterval = null;
 let packetCount = 0;
 
-// Get all broadcast addresses for local network interfaces
+// Radios we have heard announce themselves on the LAN  { ip -> { model, version, nickname, callsign, serial, ... } }
+const discoveredRadios = {};
+
+// ─── Network helpers ──────────────────────────────────────────────────────────
+
 function getBroadcastAddresses() {
   const interfaces = os.networkInterfaces();
-  const broadcasts = [];
-
+  const results = [];
   for (const [name, addrs] of Object.entries(interfaces)) {
     for (const addr of addrs) {
       if (addr.family === 'IPv4' && !addr.internal) {
-        // Calculate broadcast address from IP and netmask
-        const ip = addr.address.split('.').map(Number);
+        const ip   = addr.address.split('.').map(Number);
         const mask = addr.netmask.split('.').map(Number);
-        const broadcast = ip.map((octet, i) => octet | (~mask[i] & 255)).join('.');
-        broadcasts.push({ interface: name, broadcast, address: addr.address });
+        const broadcast = ip.map((o, i) => o | (~mask[i] & 255)).join('.');
+        results.push({ interface: name, broadcast, address: addr.address });
       }
     }
   }
-  return broadcasts;
+  return results;
 }
 
-// Config file path - use userData for installed app, local for development
+// ─── Config persistence ───────────────────────────────────────────────────────
+
 const getConfigPath = () => {
-  if (app.isPackaged) {
-    return path.join(app.getPath('userData'), 'config.json');
-  }
+  if (app.isPackaged) return path.join(app.getPath('userData'), 'config.json');
   return path.join(__dirname, '..', 'config.json');
 };
 
-// Load configuration from JSON file
 function loadConfig() {
   const configPath = getConfigPath();
   try {
     if (fs.existsSync(configPath)) {
-      const data = fs.readFileSync(configPath, 'utf8');
-      config = JSON.parse(data);
+      config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
       console.log(`Loaded config from ${configPath}`);
     } else {
-      // Create default config
       saveConfig();
-      console.log(`Created default config at ${configPath}`);
     }
   } catch (err) {
     console.error('Error loading config:', err);
   }
 }
 
-// Save configuration to JSON file
 function saveConfig() {
-  const configPath = getConfigPath();
   try {
-    fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf8');
-    console.log(`Saved config to ${configPath}`);
+    fs.writeFileSync(getConfigPath(), JSON.stringify(config, null, 2), 'utf8');
   } catch (err) {
     console.error('Error saving config:', err);
   }
 }
 
-// Build VITA-49 Discovery Packet (ported from C# SmartUnlinkService)
+// ─── VITA-49 packet builder ───────────────────────────────────────────────────
+
 function buildVita49DiscoveryPacket(radio) {
-  // Build payload string (key=value pairs separated by space)
+  // Use values captured live from the radio's own VITA-49 broadcast wherever available.
+  // This ensures serial, radio_license_id, max_licensed_version etc. are exact copies
+  // of what the real radio sends — SmartSDR validates these and will reject dummies.
+  const disc = discoveredRadios[radio.ipAddress] || {};
+
   const payloadStr = [
-    `discovery_protocol_version=3.1.0.2`,
-    `model=${radio.model}`,
-    `serial=${radio.serialNumber}`,
-    `version=${radio.version || '4.1.3.39644'}`,
-    `nickname=${radio.name}`,
-    `callsign=${radio.callsign || ''}`,
+    `discovery_protocol_version=${disc.discovery_protocol_version || '3.1.0.2'}`,
+    `model=${disc.model                        || radio.model}`,
+    `serial=${disc.serial                      || radio.serialNumber       || '0000-0000-0000-0000'}`,
+    `version=${disc.version                    || radio.version            || '4.1.3.39644'}`,
+    `nickname=${disc.nickname                  || radio.name}`,
+    `callsign=${disc.callsign                  || radio.callsign           || ''}`,
     `ip=${radio.ipAddress}`,
-    `port=4992`,
-    `status=Available`,
-    `inuse_ip=`,
-    `inuse_host=`,
-    `max_licensed_version=v3`,
-    `radio_license_id=00-00-00-00-00-00`,
-    `fpc_mac=`,
-    `wan_connected=0`,
-    `licensed_clients=4`,
-    `available_clients=4`,
-    `max_panadapters=4`,
-    `available_panadapters=4`,
-    `max_slices=4`,
-    `available_slices=4`
+    `port=${disc.port                          || '4992'}`,
+    `status=${disc.status                      || 'Available'}`,
+    `inuse_ip=${disc.inuse_ip                  || ''}`,
+    `inuse_host=${disc.inuse_host              || ''}`,
+    `max_licensed_version=${disc.max_licensed_version || radio.maxLicensedVersion || 'v3'}`,
+    `radio_license_id=${disc.radio_license_id         || radio.radioLicenseId     || '00-00-00-00-00-00'}`,
+    `fpc_mac=${disc.fpc_mac                    || ''}`,
+    `wan_connected=${disc.wan_connected        || '0'}`,
+    `licensed_clients=${disc.licensed_clients         || '4'}`,
+    `available_clients=${disc.available_clients       || '4'}`,
+    `max_panadapters=${disc.max_panadapters           || '4'}`,
+    `available_panadapters=${disc.available_panadapters || '4'}`,
+    `max_slices=${disc.max_slices              || '4'}`,
+    `available_slices=${disc.available_slices  || '4'}`
   ].join(' ');
 
-  const payloadBytes = Buffer.from(payloadStr, 'ascii');
-
-  // Pad payload to 4-byte alignment (VITA-49 requirement)
-  const paddedLength = Math.ceil(payloadBytes.length / 4) * 4;
+  const payloadBytes  = Buffer.from(payloadStr, 'ascii');
+  const paddedLength  = Math.ceil(payloadBytes.length / 4) * 4;
   const paddedPayload = Buffer.alloc(paddedLength, 0);
   payloadBytes.copy(paddedPayload);
 
-  // Calculate total packet length in 32-bit words
-  // Header(4) + StreamID(4) + ClassIDHigh(4) + ClassIDLow(4) + Timestamps(12) + Payload
-  const headerSize = 4 + 4 + 4 + 4 + 12; // 28 bytes = 7 words
+  const headerSize        = 4 + 4 + 4 + 4 + 12; // 28 bytes
   const packetLengthWords = (headerSize + paddedLength) / 4;
-
-  // Build packet
-  const packet = Buffer.alloc(headerSize + paddedLength);
+  const packet            = Buffer.alloc(headerSize + paddedLength);
   let offset = 0;
 
-  // Header (4 bytes)
-  // Bits 31-28: Packet Type 0x3 (Extension Command)
-  // Bit 27: Class ID present (1)
-  // Bits 25-24: Reserved (0)
-  // Bits 23-22: TSI 0x1 (Other timestamp)
-  // Bits 21-20: TSF 0x1 (Sample count timestamp)
-  // Bits 19-16: Packet Count
-  // Bits 15-0: Packet size in words
   const header = (0x38500000 | ((packetCount & 0xF) << 16) | (packetLengthWords & 0xFFFF)) >>> 0;
-  packet.writeUInt32BE(header, offset);
-  offset += 4;
-
-  // Stream ID (4 bytes) - 0x00000800
-  packet.writeUInt32BE(0x00000800, offset);
-  offset += 4;
-
-  // Class ID High (4 bytes) - FlexRadio OUI: 0x00001C2D
-  packet.writeUInt32BE(0x00001C2D, offset);
-  offset += 4;
-
-  // Class ID Low (4 bytes) - Discovery class code: 0x534CFFFF
-  packet.writeUInt32BE(0x534CFFFF, offset);
-  offset += 4;
-
-  // Integer Timestamp (4 bytes) - 0
-  packet.writeUInt32BE(0, offset);
-  offset += 4;
-
-  // Fractional Timestamp High (4 bytes) - 0
-  packet.writeUInt32BE(0, offset);
-  offset += 4;
-
-  // Fractional Timestamp Low (4 bytes) - 0
-  packet.writeUInt32BE(0, offset);
-  offset += 4;
-
-  // Payload
+  packet.writeUInt32BE(header,     offset); offset += 4;
+  packet.writeUInt32BE(0x00000800, offset); offset += 4;
+  packet.writeUInt32BE(0x00001C2D, offset); offset += 4;
+  packet.writeUInt32BE(0x534CFFFF, offset); offset += 4;
+  packet.writeUInt32BE(0,          offset); offset += 4;
+  packet.writeUInt32BE(0,          offset); offset += 4;
+  packet.writeUInt32BE(0,          offset); offset += 4;
   paddedPayload.copy(packet, offset);
 
-  // Increment packet count (wraps at 16)
   packetCount = (packetCount + 1) & 0xF;
-
   return packet;
 }
 
-// Start UDP broadcasting
-function startBroadcasting() {
-  if (broadcastInterval) {
-    clearInterval(broadcastInterval);
+// ─── Parse an inbound VITA-49 discovery payload ───────────────────────────────
+
+function parseDiscoveryPayload(buf) {
+  try {
+    // Skip 28-byte VITA-49 header
+    const HEADER_BYTES = 28;
+    if (buf.length <= HEADER_BYTES) return null;
+
+    // Verify FlexRadio Class ID (bytes 8-15)
+    const ouiHigh = buf.readUInt32BE(8);
+    const ouiLow  = buf.readUInt32BE(12);
+    if (ouiHigh !== 0x00001C2D || ouiLow !== 0x534CFFFF) return null;
+
+    const payload = buf.slice(HEADER_BYTES).toString('ascii').replace(/\0/g, '').trim();
+    const fields  = {};
+    for (const kv of payload.split(' ')) {
+      const eq = kv.indexOf('=');
+      if (eq !== -1) fields[kv.slice(0, eq)] = kv.slice(eq + 1);
+    }
+    if (!fields.ip || !fields.model) return null;
+    return fields;
+  } catch (_) {
+    return null;
   }
+}
 
-  udpClient = dgram.createSocket('udp4');
+// ─── UDP listener — hears radios announce themselves ─────────────────────────
 
-  udpClient.on('error', (err) => {
-    console.error('UDP Client error:', err);
-    if (mainWindow) {
-      mainWindow.webContents.send('broadcast-error', err.message);
+function startListening() {
+  if (udpListener) return;
+
+  udpListener = dgram.createSocket({ type: 'udp4', reuseAddr: true });
+
+  udpListener.on('error', (err) => {
+    console.error('UDP listener error:', err);
+  });
+
+  udpListener.on('message', (msg, rinfo) => {
+    const fields = parseDiscoveryPayload(msg);
+    if (!fields) return;
+
+    const key  = fields.ip || rinfo.address;
+    const prev = discoveredRadios[key];
+    discoveredRadios[key] = { ...fields, _seen: Date.now() };
+
+    // If this IP matches a radio already in config, backfill the real license/serial
+    // so the broadcaster can use them immediately without waiting for a manual edit.
+    const saved = config.radios.find(r => r.ipAddress === key);
+    if (saved) {
+      let dirty = false;
+      const copy = (src, dst) => { if (fields[src] && saved[dst] !== fields[src]) { saved[dst] = fields[src]; dirty = true; } };
+      copy('serial',               'serialNumber');
+      copy('version',              'version');
+      copy('max_licensed_version', 'maxLicensedVersion');
+      copy('radio_license_id',     'radioLicenseId');
+      copy('model',                'model');
+      copy('callsign',             'callsign');
+      if (dirty) {
+        saveConfig();
+        console.log(`[discovery] Updated config for ${key} with live radio data`);
+      }
+    }
+
+    // Only push to UI when it's a new discovery (or key fields changed)
+    const isNew = !prev
+      || prev.model             !== fields.model
+      || prev.version           !== fields.version
+      || prev.radio_license_id  !== fields.radio_license_id;
+
+    if (isNew && mainWindow) {
+      console.log(`[discovery] ${fields.model} @ ${fields.ip}  serial=${fields.serial}  license_id=${fields.radio_license_id}  max_licensed=${fields.max_licensed_version}  v${fields.version}`);
+      mainWindow.webContents.send('radio-discovered', discoveredRadios[key]);
     }
   });
 
-  udpClient.bind(() => {
-    udpClient.setBroadcast(true);
-    const broadcastAddresses = getBroadcastAddresses();
-    console.log('UDP broadcast enabled on interfaces:');
-    broadcastAddresses.forEach(({ interface: name, broadcast, address }) => {
-      console.log(`  ${name}: ${address} -> ${broadcast}`);
-    });
+  // Listen on port 4992 (SmartSDR discovery port) on all interfaces
+  udpListener.bind(4992, () => {
+    try { udpListener.setBroadcast(true); } catch (_) {}
+    // Also bind port 4991 via a second socket
+    startListening4991();
+    console.log('UDP discovery listener started on port 4992');
+  });
+}
+
+let udpListener4991 = null;
+function startListening4991() {
+  if (udpListener4991) return;
+  udpListener4991 = dgram.createSocket({ type: 'udp4', reuseAddr: true });
+  udpListener4991.on('error', () => {});
+  udpListener4991.on('message', (msg, rinfo) => {
+    const fields = parseDiscoveryPayload(msg);
+    if (!fields) return;
+    const key = fields.ip || rinfo.address;
+    discoveredRadios[key] = { ...fields, _seen: Date.now() };
+  });
+  udpListener4991.bind(4991, () => {
+    try { udpListener4991.setBroadcast(true); } catch (_) {}
+  });
+}
+
+// ─── UDP sender — broadcasts our proxy packets ────────────────────────────────
+
+function startBroadcasting() {
+  if (broadcastInterval) clearInterval(broadcastInterval);
+
+  udpSender = dgram.createSocket('udp4');
+  udpSender.on('error', (err) => {
+    console.error('UDP sender error:', err);
+    if (mainWindow) mainWindow.webContents.send('broadcast-error', err.message);
+  });
+
+  udpSender.bind(() => {
+    udpSender.setBroadcast(true);
 
     broadcastInterval = setInterval(() => {
-      const enabledRadios = config.radios.filter(r => r.enabled);
-      const broadcastAddresses = getBroadcastAddresses();
+      const enabledRadios    = config.radios.filter(r => r.enabled);
+      const broadcastAddrs   = getBroadcastAddresses();
 
       enabledRadios.forEach(radio => {
         const packet = buildVita49DiscoveryPacket(radio);
-
-        // Send to each network interface's broadcast address
-        broadcastAddresses.forEach(({ broadcast, interface: ifaceName }) => {
-          // Send to port 4992 (SmartSDR command API)
-          udpClient.send(packet, 0, packet.length, 4992, broadcast, (err) => {
-            if (err) {
-              console.error(`Error broadcasting to ${broadcast}:4992 (${ifaceName}) for ${radio.name}:`, err);
-            }
-          });
-
-          // Send to port 4991 (VITA-49 streaming, for compatibility)
-          udpClient.send(packet, 0, packet.length, 4991, broadcast, (err) => {
-            if (err) {
-              console.error(`Error broadcasting to ${broadcast}:4991 (${ifaceName}) for ${radio.name}:`, err);
-            }
-          });
+        broadcastAddrs.forEach(({ broadcast }) => {
+          udpSender.send(packet, 0, packet.length, 4992, broadcast, () => {});
+          udpSender.send(packet, 0, packet.length, 4991, broadcast, () => {});
         });
       });
 
-      // Notify UI of broadcast
       if (mainWindow && enabledRadios.length > 0) {
         mainWindow.webContents.send('broadcast-tick', {
-          timestamp: new Date().toISOString(),
-          radioCount: enabledRadios.length,
-          interfaceCount: broadcastAddresses.length
+          timestamp:      new Date().toISOString(),
+          radioCount:     enabledRadios.length,
+          interfaceCount: getBroadcastAddresses().length
         });
       }
     }, config.broadcastIntervalMs || 3000);
@@ -223,54 +263,39 @@ function startBroadcasting() {
   });
 }
 
-// Stop UDP broadcasting
 function stopBroadcasting() {
-  if (broadcastInterval) {
-    clearInterval(broadcastInterval);
-    broadcastInterval = null;
-  }
-  if (udpClient) {
-    udpClient.close();
-    udpClient = null;
-  }
+  if (broadcastInterval) { clearInterval(broadcastInterval); broadcastInterval = null; }
+  if (udpSender)          { udpSender.close(); udpSender = null; }
   console.log('Broadcasting stopped');
 }
 
-// Create main window
+// ─── Window ───────────────────────────────────────────────────────────────────
+
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 900,
-    height: 700,
-    minWidth: 700,
-    minHeight: 500,
+    width: 900, height: 700, minWidth: 700, minHeight: 500,
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload:          path.join(__dirname, 'preload.js'),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration:  false
     },
-    title: 'SmartUnlink by EI6LF - FlexRadio Discovery Proxy',
+    title:           'SmartUnlink - FlexRadio Discovery Proxy',
     backgroundColor: '#1a1a2e'
   });
 
   mainWindow.loadFile(path.join(__dirname, '..', 'src', 'index.html'));
-
-  mainWindow.on('closed', () => {
-    mainWindow = null;
-  });
+  mainWindow.on('closed', () => { mainWindow = null; });
 }
 
-// IPC Handlers
-ipcMain.handle('get-radios', () => {
-  return config.radios;
-});
+// ─── IPC handlers ─────────────────────────────────────────────────────────────
 
-ipcMain.handle('get-config', () => {
-  return config;
-});
+ipcMain.handle('get-radios',  () => config.radios);
+ipcMain.handle('get-config',  () => config);
 
 ipcMain.handle('add-radio', (event, radio) => {
-  radio.id = uuidv4();
+  radio.id      = uuidv4();
   radio.enabled = radio.enabled || false;
+  if (!radio.serialNumber) radio.serialNumber = '0000-0000-0000-0000';
   config.radios.push(radio);
   saveConfig();
   return radio;
@@ -278,61 +303,46 @@ ipcMain.handle('add-radio', (event, radio) => {
 
 ipcMain.handle('update-radio', (event, radio) => {
   const index = config.radios.findIndex(r => r.id === radio.id);
-  if (index !== -1) {
-    config.radios[index] = radio;
-    saveConfig();
-    return true;
-  }
+  if (index !== -1) { config.radios[index] = radio; saveConfig(); return true; }
   return false;
 });
 
 ipcMain.handle('delete-radio', (event, radioId) => {
   const index = config.radios.findIndex(r => r.id === radioId);
-  if (index !== -1) {
-    config.radios.splice(index, 1);
-    saveConfig();
-    return true;
-  }
+  if (index !== -1) { config.radios.splice(index, 1); saveConfig(); return true; }
   return false;
 });
 
 ipcMain.handle('set-radio-enabled', (event, { radioId, enabled }) => {
   const radio = config.radios.find(r => r.id === radioId);
-  if (radio) {
-    radio.enabled = enabled;
-    saveConfig();
-    return true;
-  }
+  if (radio) { radio.enabled = enabled; saveConfig(); return true; }
   return false;
 });
 
 ipcMain.handle('set-broadcast-interval', (event, interval) => {
   config.broadcastIntervalMs = interval;
   saveConfig();
-  // Restart broadcasting with new interval
-  if (broadcastInterval) {
-    stopBroadcasting();
-    startBroadcasting();
-  }
+  if (broadcastInterval) { stopBroadcasting(); startBroadcasting(); }
   return true;
 });
 
-ipcMain.handle('get-config-path', () => {
-  return getConfigPath();
-});
+ipcMain.handle('get-config-path',    () => getConfigPath());
+ipcMain.handle('get-discovered',     () => Object.values(discoveredRadios));
 
 ipcMain.handle('open-config-folder', () => {
-  const configPath = getConfigPath();
-  const configDir = path.dirname(configPath);
-  require('electron').shell.openPath(configDir);
+  const dir = path.dirname(getConfigPath());
+  // Ensure the directory exists before trying to open it
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  shell.openPath(dir);
   return true;
 });
 
+// TCP version fetch from radio's command API
 ipcMain.handle('fetch-radio-version', (event, ipAddress) => {
   return new Promise((resolve, reject) => {
     const TIMEOUT_MS = 5000;
     let settled = false;
-    let buffer = '';
+    let buffer  = '';
 
     const done = (result) => {
       if (settled) return;
@@ -343,77 +353,51 @@ ipcMain.handle('fetch-radio-version', (event, ipAddress) => {
       else resolve(result.value);
     };
 
-    const timer = setTimeout(() => {
-      done({ error: `Timed out connecting to ${ipAddress}:4992 — is the radio on and reachable?` });
-    }, TIMEOUT_MS);
+    const timer = setTimeout(() =>
+      done({ error: `Timed out connecting to ${ipAddress}:4992 — is the radio on and reachable?` }),
+      TIMEOUT_MS
+    );
 
     const socket = new net.Socket();
-
-    socket.on('error', (err) => {
-      done({ error: `Could not connect to ${ipAddress}:4992 — ${err.message}` });
-    });
+    socket.on('error', err => done({ error: `Could not reach ${ipAddress}:4992 — ${err.message}` }));
 
     socket.connect(4992, ipAddress, () => {
-      console.log(`[fetch-radio-version] Connected to ${ipAddress}:4992`);
-      // The Flex radio sends a version message immediately on connect; also send 'v' to be safe
+      console.log(`[fetch-version] Connected to ${ipAddress}:4992`);
       socket.write('v\n');
     });
 
     socket.on('data', (chunk) => {
       buffer += chunk.toString('ascii');
-      const lines = buffer.split('\n');
-      buffer = lines.pop(); // keep partial last line
-
-      for (const line of lines) {
-        const trimmed = line.trim();
-        console.log(`[fetch-radio-version] <-- ${trimmed}`);
-
-        // Response lines look like:
-        //   V version=4.1.3.39644|...
-        //   S version=4.1.3.39644
-        //   version=4.1.3.39644   (plain)
-        const match =
-          trimmed.match(/\bversion=(\S+)/i) ||       // any key=value
-          trimmed.match(/^V\s+(\d+\.\d+\.\d+\.\d+)/i); // bare V response
-
-        if (match) {
-          // Strip trailing pipe-separated fields if present
-          const ver = match[1].split('|')[0].trim();
-          console.log(`[fetch-radio-version] Detected version: ${ver}`);
-          done({ value: ver });
-          return;
-        }
+      for (const line of buffer.split('\n')) {
+        const m = line.match(/\bversion=([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/i);
+        if (m) { done({ value: m[1] }); return; }
       }
+      // Keep only the last (potentially incomplete) line
+      buffer = buffer.split('\n').pop();
     });
 
     socket.on('close', () => {
-      if (!settled) {
-        done({ error: 'Radio closed the connection before returning a version string.' });
-      }
+      if (!settled) done({ error: 'Radio closed the connection before returning a version string.' });
     });
   });
 });
 
-// App lifecycle
+// ─── App lifecycle ────────────────────────────────────────────────────────────
+
 app.whenReady().then(() => {
   loadConfig();
   createWindow();
-  startBroadcasting();
+  startListening();    // listen for radios on LAN
+  startBroadcasting(); // proxy our configured radios
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
-    }
+    if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });
 
 app.on('window-all-closed', () => {
   stopBroadcasting();
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
+  if (process.platform !== 'darwin') app.quit();
 });
 
-app.on('before-quit', () => {
-  stopBroadcasting();
-});
+app.on('before-quit', () => stopBroadcasting());
