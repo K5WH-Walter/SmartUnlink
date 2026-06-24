@@ -22,10 +22,10 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v4.4.0
         with:
           node-version: '24'
           cache: 'npm'
@@ -42,7 +42,7 @@ jobs:
         run: dir dist
 
       - name: Upload Windows artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: SmartUnlink-Windows
           path: |
@@ -55,10 +55,10 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v4.4.0
         with:
           node-version: '24'
           cache: 'npm'
@@ -76,7 +76,7 @@ jobs:
         run: ls -la dist/
 
       - name: Upload macOS artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: SmartUnlink-macOS
           path: |
@@ -89,10 +89,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v4.4.0
         with:
           node-version: '24'
           cache: 'npm'
@@ -114,7 +114,7 @@ jobs:
         run: ls -la dist/
 
       - name: Upload Linux artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: SmartUnlink-Linux
           path: |
@@ -131,21 +131,21 @@ jobs:
 
     steps:
       - name: Download Windows artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v4.1.9
         with:
           name: SmartUnlink-Windows
           path: release-assets
         continue-on-error: true
 
       - name: Download macOS artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v4.1.9
         with:
           name: SmartUnlink-macOS
           path: release-assets
         continue-on-error: true
 
       - name: Download Linux artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v4.1.9
         with:
           name: SmartUnlink-Linux
           path: release-assets
@@ -155,7 +155,7 @@ jobs:
         run: ls -lh release-assets/
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v2.3.2
         with:
           tag_name: ${{ github.ref_name }}
           name: SmartUnlink ${{ github.ref_name }} — K5WH Edition
