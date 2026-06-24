@@ -594,3 +594,49 @@ body {
     justify-content: space-between;
   }
 }
+
+/* Version fetch row */
+.version-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.version-row input {
+  flex: 1;
+}
+
+#fetchVersionBtn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+#fetchVersionBtn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+#fetchVersionBtn.loading svg {
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.form-help {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 4px;
+}
+
+.form-help.success {
+  color: var(--success);
+}
+
+.form-help.error {
+  color: var(--danger);
+}

@@ -190,6 +190,9 @@ function openAddModal() {
   document.getElementById('saveRadioBtn').textContent = 'Save Radio';
   radioForm.reset();
   document.getElementById('radioVersion').value = '4.1.3.39644';
+  const helpEl = document.getElementById('versionHelp');
+  helpEl.textContent = 'Enter the IP above, then click "Fetch from Radio" to auto-detect.';
+  helpEl.className = 'form-help';
   radioModal.classList.add('visible');
 }
 
@@ -204,6 +207,10 @@ function openEditModal(radio) {
   document.getElementById('radioModel').value = radio.model;
   document.getElementById('radioCallsign').value = radio.callsign || '';
   document.getElementById('radioVersion').value = radio.version || '4.1.3.39644';
+
+  const helpEl = document.getElementById('versionHelp');
+  helpEl.textContent = 'Click "Fetch from Radio" to refresh the version from the live radio.';
+  helpEl.className = 'form-help';
 
   radioModal.classList.add('visible');
 }
@@ -335,6 +342,38 @@ function setupBroadcastListener() {
 
 // Setup event listeners
 function setupEventListeners() {
+  // Fetch version from radio
+  document.getElementById('fetchVersionBtn').addEventListener('click', async () => {
+    const ip = document.getElementById('radioIp').value.trim();
+    const versionInput = document.getElementById('radioVersion');
+    const helpEl = document.getElementById('versionHelp');
+    const btn = document.getElementById('fetchVersionBtn');
+
+    if (!ip || !validateIpAddress(ip)) {
+      helpEl.textContent = 'Enter a valid IP address first.';
+      helpEl.className = 'form-help error';
+      return;
+    }
+
+    btn.disabled = true;
+    btn.classList.add('loading');
+    helpEl.textContent = `Connecting to ${ip}:4992…`;
+    helpEl.className = 'form-help';
+
+    try {
+      const version = await window.smartunlink.fetchRadioVersion(ip);
+      versionInput.value = version;
+      helpEl.textContent = `✓ Version detected: ${version}`;
+      helpEl.className = 'form-help success';
+    } catch (err) {
+      helpEl.textContent = `✗ ${err.message}`;
+      helpEl.className = 'form-help error';
+    } finally {
+      btn.disabled = false;
+      btn.classList.remove('loading');
+    }
+  });
+
   // Add radio buttons
   addRadioBtn.addEventListener('click', openAddModal);
   addFirstRadioBtn.addEventListener('click', openAddModal);
