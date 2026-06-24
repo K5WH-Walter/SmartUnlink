@@ -173,6 +173,12 @@ jobs:
       - name: List release assets
         run: ls -lh release-assets/
 
+      - name: Rename files with spaces
+        run: |
+          cd release-assets
+          for f in *\ *; do mv "$f" "${f// /-}"; done
+          ls -lh
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2.3.2
         with:
