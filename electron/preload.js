@@ -1,5 +1,4 @@
 const { contextBridge, ipcRenderer } = require('electron');
-const { app } = require('@electron/remote') || {};
 
 contextBridge.exposeInMainWorld('smartunlink', {
   // App info
