@@ -1,16 +1,9 @@
 name: Build & Release
 
-# ── Triggers ──────────────────────────────────────────────────────────────────
-# • Push a version tag  (git tag v1.0.5 && git push --tags)  → full build + GitHub Release
-# • Push to main / PR  → build only, no release (smoke test)
-# • Manual trigger     → choose whether to publish a release
 on:
   push:
-    branches: [main]
     tags:
       - 'v*'
-  pull_request:
-    branches: [main]
   workflow_dispatch:
     inputs:
       publish:
@@ -21,149 +14,167 @@ on:
         options: ['false', 'true']
 
 permissions:
-  contents: write   # needed to create releases and upload assets
+  contents: write
 
-# ── Build matrix ──────────────────────────────────────────────────────────────
 jobs:
-  build:
-    strategy:
-      fail-fast: false      # keep building other platforms even if one fails
-      matrix:
-        include:
-          - os: windows-latest
-            platform: win
-            label: Windows
-            artifact: SmartUnlink-Windows
-            glob: 'dist/*.exe'
-
-          - os: macos-latest
-            platform: mac
-            label: macOS
-            artifact: SmartUnlink-macOS
-            glob: 'dist/*.dmg dist/*.zip'
-
-          - os: ubuntu-latest
-            platform: linux
-            label: Linux
-            artifact: SmartUnlink-Linux
-            glob: 'dist/*.AppImage dist/*.deb dist/*.rpm'
-
-    runs-on: ${{ matrix.os }}
-    name: Build ${{ matrix.label }}
-
+  build-windows:
+    name: Build Windows
+    runs-on: windows-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js 20
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
 
-      # ── Cache Electron binaries to speed up repeat builds ──
-      - name: Get Electron version
-        id: electron-ver
-        shell: bash
-        run: |
-          VER=$(node -p "require('./package.json').devDependencies.electron")
-          echo "version=$VER" >> "$GITHUB_OUTPUT"
+      - name: Install dependencies
+        run: npm ci
 
-      - name: Cache Electron binaries
-        uses: actions/cache@v4
+      - name: Build Windows
+        run: npx electron-builder --win --publish never
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: List dist folder
+        run: dir dist
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
         with:
+          name: SmartUnlink-Windows
           path: |
-            ~/AppData/Local/electron/Cache
-            ~/.cache/electron
-            ~/Library/Caches/electron
-          key: electron-${{ matrix.os }}-${{ steps.electron-ver.outputs.version }}
-          restore-keys: electron-${{ matrix.os }}-
+            dist/*.exe
+            dist/*.msi
+          if-no-files-found: warn
 
-      # ── Linux: install native deps needed by electron-builder ──
-      - name: Install Linux build dependencies
-        if: matrix.os == 'ubuntu-latest'
+  build-macos:
+    name: Build macOS
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build macOS
+        run: npx electron-builder --mac --publish never
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: List dist folder
+        run: ls -la dist/
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: SmartUnlink-macOS
+          path: |
+            dist/*.dmg
+            dist/*.zip
+          if-no-files-found: warn
+
+  build-linux:
+    name: Build Linux
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Linux dependencies
         run: |
           sudo apt-get update -y
           sudo apt-get install -y rpm fakeroot dpkg
 
-      - name: Install npm dependencies
+      - name: Install dependencies
         run: npm ci
-        env:
-          ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
-          ELECTRON_BUILDER_BINARIES_MIRROR: https://npmmirror.com/mirrors/electron-builder-binaries/
 
-      # ── Determine publish flag ──
-      # Publish when: version tag pushed  OR  workflow_dispatch with publish=true
-      - name: Set publish mode
-        id: pub
-        shell: bash
-        run: |
-          if [[ "${{ github.ref }}" == refs/tags/v* ]] || \
-             [[ "${{ github.event.inputs.publish }}" == "true" ]]; then
-            echo "mode=always" >> "$GITHUB_OUTPUT"
-          else
-            echo "mode=never"  >> "$GITHUB_OUTPUT"
-          fi
-
-      # ── Build ──
-      - name: Build ${{ matrix.label }}
-        run: npx electron-builder --${{ matrix.platform }} --publish ${{ steps.pub.outputs.mode }}
+      - name: Build Linux
+        run: npx electron-builder --linux --publish never
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
-          ELECTRON_BUILDER_BINARIES_MIRROR: https://npmmirror.com/mirrors/electron-builder-binaries/
-          # macOS code signing — leave blank if you don't have a Developer ID cert.
-          # To sign: add CSC_LINK (base64 .p12) and CSC_KEY_PASSWORD as repo secrets.
-          CSC_IDENTITY_AUTO_DISCOVERY: false
 
-      # ── Upload build artifacts (available for 30 days on every build) ──
-      - name: Upload artifacts
+      - name: List dist folder
+        run: ls -la dist/
+
+      - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.glob }}
+          name: SmartUnlink-Linux
+          path: |
+            dist/*.AppImage
+            dist/*.deb
+            dist/*.rpm
           if-no-files-found: warn
-          retention-days: 30
 
-  # ── Create GitHub Release (tag pushes only) ────────────────────────────────
   release:
     name: Publish GitHub Release
-    needs: build
+    needs: [build-windows, build-macos, build-linux]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.publish == 'true'
 
     steps:
-      - name: Download all artifacts
+      - name: Download Windows artifacts
         uses: actions/download-artifact@v4
         with:
+          name: SmartUnlink-Windows
           path: release-assets
-          merge-multiple: true
 
-      - name: List files to be released
+      - name: Download macOS artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: SmartUnlink-macOS
+          path: release-assets
+
+      - name: Download Linux artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: SmartUnlink-Linux
+          path: release-assets
+
+      - name: List release assets
         run: ls -lh release-assets/
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.ref_name }}
+          name: SmartUnlink ${{ github.ref_name }} — K5WH Edition
           files: release-assets/*
           draft: false
           prerelease: ${{ contains(github.ref, '-beta') || contains(github.ref, '-rc') }}
-          generate_release_notes: true
           body: |
-            ## SmartUnlink ${{ github.ref_name }}
+            ## SmartUnlink ${{ github.ref_name }} — K5WH Edition
+
+            Enhanced fork by **Walter Holmes — K5WH** • Houston, TX
+            Live 24/7 support: http://www.k5wh.net/zoom
+            Original author: Brian EI6LF — https://github.com/brianbruff/SmartUnlink
 
             ### Downloads
             | Platform | File | Notes |
             |----------|------|-------|
-            | Windows  | `SmartUnlink-Setup-*.exe` | Installer (recommended) |
-            | Windows  | `SmartUnlink-*.exe` (portable) | No install needed |
-            | macOS (Intel) | `SmartUnlink-*-x64.dmg` | Intel Mac |
-            | macOS (Apple Silicon) | `SmartUnlink-*-arm64.dmg` | M1/M2/M3 Mac |
-            | Linux | `SmartUnlink-*.AppImage` | Universal — chmod +x, then run |
+            | Windows | `SmartUnlink Setup *.exe` | Installer (recommended) |
+            | Windows | `SmartUnlink *.exe` | Portable — no install needed |
+            | macOS Intel | `SmartUnlink-*-x64.dmg` | Intel Mac |
+            | macOS Apple Silicon | `SmartUnlink-*-arm64.dmg` | M1/M2/M3 Mac |
+            | Linux | `SmartUnlink-*.AppImage` | Universal — chmod +x then run |
             | Linux | `SmartUnlink-*.deb` | Debian / Ubuntu |
             | Linux | `SmartUnlink-*.rpm` | Fedora / RHEL |
-
-            ### What's in this release
-            See commit history for full change details.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
