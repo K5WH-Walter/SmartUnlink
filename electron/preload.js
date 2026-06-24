@@ -10,6 +10,9 @@ contextBridge.exposeInMainWorld('smartunlink', {
   deleteRadio: (radioId) => ipcRenderer.invoke('delete-radio', radioId),
   setRadioEnabled: (radioId, enabled) => ipcRenderer.invoke('set-radio-enabled', { radioId, enabled }),
 
+  // Radio version auto-detect
+  fetchRadioVersion: (ipAddress) => ipcRenderer.invoke('fetch-radio-version', ipAddress),
+
   // Configuration
   setBroadcastInterval: (interval) => ipcRenderer.invoke('set-broadcast-interval', interval),
   getConfigPath: () => ipcRenderer.invoke('get-config-path'),

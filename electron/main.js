@@ -2,6 +2,7 @@ const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const dgram = require('dgram');
+const net = require('net');
 const os = require('os');
 const { v4: uuidv4 } = require('uuid');
 
@@ -325,6 +326,72 @@ ipcMain.handle('open-config-folder', () => {
   const configDir = path.dirname(configPath);
   require('electron').shell.openPath(configDir);
   return true;
+});
+
+ipcMain.handle('fetch-radio-version', (event, ipAddress) => {
+  return new Promise((resolve, reject) => {
+    const TIMEOUT_MS = 5000;
+    let settled = false;
+    let buffer = '';
+
+    const done = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { socket.destroy(); } catch (_) {}
+      if (result.error) reject(new Error(result.error));
+      else resolve(result.value);
+    };
+
+    const timer = setTimeout(() => {
+      done({ error: `Timed out connecting to ${ipAddress}:4992 — is the radio on and reachable?` });
+    }, TIMEOUT_MS);
+
+    const socket = new net.Socket();
+
+    socket.on('error', (err) => {
+      done({ error: `Could not connect to ${ipAddress}:4992 — ${err.message}` });
+    });
+
+    socket.connect(4992, ipAddress, () => {
+      console.log(`[fetch-radio-version] Connected to ${ipAddress}:4992`);
+      // The Flex radio sends a version message immediately on connect; also send 'v' to be safe
+      socket.write('v\n');
+    });
+
+    socket.on('data', (chunk) => {
+      buffer += chunk.toString('ascii');
+      const lines = buffer.split('\n');
+      buffer = lines.pop(); // keep partial last line
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        console.log(`[fetch-radio-version] <-- ${trimmed}`);
+
+        // Response lines look like:
+        //   V version=4.1.3.39644|...
+        //   S version=4.1.3.39644
+        //   version=4.1.3.39644   (plain)
+        const match =
+          trimmed.match(/\bversion=(\S+)/i) ||       // any key=value
+          trimmed.match(/^V\s+(\d+\.\d+\.\d+\.\d+)/i); // bare V response
+
+        if (match) {
+          // Strip trailing pipe-separated fields if present
+          const ver = match[1].split('|')[0].trim();
+          console.log(`[fetch-radio-version] Detected version: ${ver}`);
+          done({ value: ver });
+          return;
+        }
+      }
+    });
+
+    socket.on('close', () => {
+      if (!settled) {
+        done({ error: 'Radio closed the connection before returning a version string.' });
+      }
+    });
+  });
 });
 
 // App lifecycle
