@@ -39,7 +39,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: List dist folder
-        run: dir dist /s /b
+        run: Get-ChildItem -Path dist -Recurse | Select-Object FullName
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4.6.2
