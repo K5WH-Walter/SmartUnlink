@@ -5,6 +5,10 @@
   "main": "electron/main.js",
   "scripts": {
     "start": "electron .",
+    "dist": "electron-builder --win",
+    "dist:portable": "electron-builder --win portable",
+    "dist:mac": "electron-builder --mac",
+    "dist:linux": "electron-builder --linux",
     "build": "electron-builder --win",
     "build:portable": "electron-builder --win portable"
   },
@@ -25,16 +29,24 @@
     },
     "win": {
       "target": [
-        {
-          "target": "nsis",
-          "arch": ["x64"]
-        },
-        {
-          "target": "portable",
-          "arch": ["x64"]
-        }
+        { "target": "nsis",     "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ]
+    },
+    "mac": {
+      "target": [
+        { "target": "dmg", "arch": ["x64", "arm64"] },
+        { "target": "zip", "arch": ["x64", "arm64"] }
       ],
-      "icon": "assets/icon.ico"
+      "category": "public.app-category.utilities"
+    },
+    "linux": {
+      "target": [
+        { "target": "AppImage", "arch": ["x64"] },
+        { "target": "deb",      "arch": ["x64"] },
+        { "target": "rpm",      "arch": ["x64"] }
+      ],
+      "category": "Utility"
     },
     "nsis": {
       "oneClick": false,
@@ -45,7 +57,6 @@
     "files": [
       "electron/**/*",
       "src/**/*",
-      "assets/**/*",
       "config.json"
     ],
     "extraResources": [
