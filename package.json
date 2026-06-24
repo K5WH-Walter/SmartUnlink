@@ -12,7 +12,10 @@
     "build": "electron-builder --win",
     "build:portable": "electron-builder --win portable"
   },
-  "author": "SmartUnlink",
+  "author": {
+    "name": "Walter Holmes K5WH",
+    "email": "k5wh@k5wh.net"
+  },
   "license": "MIT",
   "devDependencies": {
     "electron": "^28.0.0",
